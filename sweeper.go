@@ -6,10 +6,10 @@ import (
 )
 
 const (
-	// SweepDefaultInterval is
-	SweepDefaultInterval = time.Second * 30
-	// SweepDefaultExpire is
-	SweepDefaultExpire = time.Minute * 5
+	// DefaultInterval is
+	DefaultInterval = time.Second * 30
+	// DefaultExpire is
+	DefaultExpire = time.Minute * 5
 )
 
 // Sweeper is expiration manager
@@ -22,10 +22,10 @@ type Sweeper struct {
 
 func (s *Sweeper) checkExpiration(t *Throttle) {
 	if s.Interval == 0 {
-		s.Interval = SweepDefaultInterval
+		s.Interval = DefaultInterval
 	}
 	if s.Expire == 0 {
-		s.Expire = SweepDefaultExpire
+		s.Expire = DefaultExpire
 	}
 
 	s.stop = make(chan struct{})

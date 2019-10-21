@@ -2,13 +2,11 @@ package cache
 
 import (
 	"sync"
-
-	"github.com/pkg/errors"
 )
 
 // Throttle is
 type Throttle struct {
-	loader  Loader
+	factory Factory
 	m       map[string]Cache
 	th      []string
 	mutex   sync.Mutex
@@ -16,9 +14,9 @@ type Throttle struct {
 }
 
 // NewThrottle is
-func NewThrottle(loader Loader, capacity int, sweeper *Sweeper) *Throttle {
+func NewThrottle(factory Factory, capacity int, sweeper *Sweeper) *Throttle {
 	return &Throttle{
-		loader:  loader,
+		factory: factory,
 		m:       make(map[string]Cache),
 		th:      make([]string, 0, capacity),
 		sweeper: sweeper,
@@ -32,7 +30,7 @@ func (t *Throttle) Get(key string) (interface{}, error) {
 
 	c, ok := t.m[key]
 	if !ok {
-		newCache, err := t.loader(key)
+		newCache, err := t.factory(key)
 		if err != nil {
 			return nil, err
 		}
@@ -43,24 +41,49 @@ func (t *Throttle) Get(key string) (interface{}, error) {
 		t.shift(key)
 		err = newCache.Reload()
 		if err != nil {
-			return newCache.Get(), nil
+			return nil, err
 		}
-		return nil, err
+		return newCache.Get(), nil
 	}
 
 	updated, err := c.Updated()
 	if err != nil {
 		t.terminate(key)
-		return nil, errors.Wrap(err, "Throttle.Get")
+		return nil, &OpError{"update", err}
 	} else if updated {
 		err := c.Reload()
 		if err != nil {
 			t.terminate(key)
-			return nil, errors.Wrap(err, "Throttle.Get")
+			return nil, &OpError{"reload", err}
 		}
 	}
 	t.shift(key)
 	return c.Get(), nil
+}
+
+// Reset is
+func (t *Throttle) Reset(key string, v interface{}) error {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	c, ok := t.m[key]
+	if !ok {
+		var err error
+		c, err = t.factory(key)
+		if err != nil {
+			return err
+		}
+		if t.sweeper != nil {
+			c = t.sweeper.touch(c)
+		}
+		t.m[key] = c
+	}
+	t.shift(key)
+	err := c.Reset(v)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (t *Throttle) shift(key string) {
@@ -98,7 +121,7 @@ func (t *Throttle) shift(key string) {
 }
 
 // Terminate is
-func (t *Throttle) Terminate() { // ============================================================================================-
+func (t *Throttle) Terminate() {
 	if t.sweeper != nil {
 		close(t.sweeper.stop)
 	}
@@ -111,4 +134,10 @@ func (t *Throttle) Terminate() { // ============================================
 func (t *Throttle) terminate(key string) {
 	t.m[key].Release()
 	delete(t.m, key)
+	for i := range t.th {
+		if t.th[i] == key {
+			t.th = append(t.th[:i], t.th[i+1:]...)
+			return
+		}
+	}
 }

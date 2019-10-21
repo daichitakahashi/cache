@@ -4,23 +4,40 @@ import (
 	"io"
 	"os"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
-type file struct {
-	filename string
-	object   interface{}
-	modTime  time.Time
-	loadFunc func(r io.Reader) (interface{}, error)
+type (
+	// Unmarshaler :
+	Unmarshaler func(io.Reader) (interface{}, error)
+
+	// Marshaler :
+	Marshaler func(interface{}, io.Writer) error
+)
+
+// FromFile :
+func FromFile(unmarshal Unmarshaler, marshal Marshaler) Factory {
+	return func(key string) (Cache, error) {
+		file := &file{
+			filename:  key,
+			unmarshal: unmarshal,
+			marshal:   marshal,
+		}
+		/*
+			err := file.Reload()
+			if err != nil {
+				return nil, err
+			}
+		*/
+		return file, nil
+	}
 }
 
-// NewFile is
-func NewFile(filename string, loadFunc func(r io.Reader) (interface{}, error)) (Cache, error) { // ==============================================================--
-	return &file{
-		filename: filename,
-		loadFunc: loadFunc,
-	}, nil
+type file struct {
+	filename  string
+	object    interface{}
+	modTime   time.Time
+	unmarshal Unmarshaler
+	marshal   Marshaler
 }
 
 func (f *file) Get() interface{} {
@@ -30,18 +47,18 @@ func (f *file) Get() interface{} {
 func (f *file) Reload() error {
 	fd, err := os.Open(f.filename)
 	if err != nil {
-		return errors.Wrap(err, "Reload")
+		return err
 	}
 	defer fd.Close()
 
-	f.object, err = f.loadFunc(fd)
+	f.object, err = f.unmarshal(fd)
 	if err != nil {
-		return errors.Wrap(err, "Reload")
+		return err
 	}
 
 	fi, err := fd.Stat()
 	if err != nil {
-		return errors.Wrap(err, "Reload: unknown error")
+		return err
 	}
 	f.modTime = fi.ModTime()
 
@@ -51,11 +68,27 @@ func (f *file) Reload() error {
 func (f *file) Updated() (bool, error) {
 	fi, err := os.Stat(f.filename)
 	if err != nil {
-		return false, errors.Errorf("Updated: file lost(filename=%s)", f.filename)
+		return false, &OpError{"check update", err}
 	}
 	modTime := fi.ModTime()
 	return !modTime.Equal(f.modTime), nil
 
+}
+
+func (f *file) Reset(v interface{}) error {
+	if f.marshal != nil {
+		fd, err := os.Create(f.filename)
+		if err != nil {
+			return err
+		}
+		defer fd.Close()
+		err = f.marshal(f.object, fd)
+		if err != nil {
+			return err
+		}
+	}
+	f.object = v
+	return nil
 }
 
 func (f *file) Release() {
