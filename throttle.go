@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -10,17 +11,22 @@ type Throttle struct {
 	m       map[string]Cache
 	th      []string
 	mutex   sync.Mutex
-	sweeper *Sweeper
+	sweeper Sweeper
 }
 
 // NewThrottle is
-func NewThrottle(factory Factory, capacity int, sweeper *Sweeper) *Throttle {
-	return &Throttle{
+func NewThrottle(factory Factory, capacity int, sweeper Sweeper) *Throttle {
+	if sweeper == nil {
+		sweeper = nop
+	}
+	th := &Throttle{
 		factory: factory,
 		m:       make(map[string]Cache),
 		th:      make([]string, 0, capacity),
 		sweeper: sweeper,
 	}
+	sweeper.register(th)
+	return th
 }
 
 // Get is
@@ -61,25 +67,17 @@ func (t *Throttle) Get(key string) (interface{}, error) {
 	return c.Get(), nil
 }
 
-// Reset is
-func (t *Throttle) Reset(key string, v interface{}) error {
+// Replace is
+func (t *Throttle) Replace(key string, v interface{}) error {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
 	c, ok := t.m[key]
 	if !ok {
-		var err error
-		c, err = t.factory(key)
-		if err != nil {
-			return err
-		}
-		if t.sweeper != nil {
-			c = t.sweeper.touch(c)
-		}
-		t.m[key] = c
+		return &OpError{"replace", fmt.Errorf("key %s not found", key)}
 	}
 	t.shift(key)
-	err := c.Reset(v)
+	err := c.Replace(v)
 	if err != nil {
 		return err
 	}
@@ -104,7 +102,6 @@ func (t *Throttle) shift(key string) {
 		if l == cap(t.th) {
 			pos = l - 1
 			lastKey := t.th[pos]
-			//delete(t.m, lastKey)
 			t.terminate(lastKey)
 		} else {
 			pos = l
@@ -120,17 +117,6 @@ func (t *Throttle) shift(key string) {
 	}
 }
 
-// Terminate is
-func (t *Throttle) Terminate() {
-	if t.sweeper != nil {
-		close(t.sweeper.stop)
-	}
-	for _, c := range t.m {
-		c.Release()
-	}
-	t.th = nil
-}
-
 func (t *Throttle) terminate(key string) {
 	t.m[key].Release()
 	delete(t.m, key)
@@ -140,4 +126,12 @@ func (t *Throttle) terminate(key string) {
 			return
 		}
 	}
+}
+
+func (t *Throttle) terminateAll() {
+	for _, c := range t.m {
+		c.Release()
+	}
+	t.th = nil
+	t.m = nil
 }

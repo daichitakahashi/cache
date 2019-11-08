@@ -75,7 +75,7 @@ func (f *file) Updated() (bool, error) {
 
 }
 
-func (f *file) Reset(v interface{}) error {
+func (f *file) Replace(v interface{}) error {
 	if f.marshal != nil {
 		fd, err := os.Create(f.filename)
 		if err != nil {

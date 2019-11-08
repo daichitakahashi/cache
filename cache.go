@@ -8,6 +8,6 @@ type Cache interface {
 	Get() interface{}
 	Reload() error
 	Updated() (bool, error)
-	Reset(interface{}) error
+	Replace(interface{}) error
 	Release()
 }

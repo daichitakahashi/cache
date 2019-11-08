@@ -12,92 +12,179 @@ const (
 	DefaultExpire = time.Minute * 5
 )
 
-// Sweeper is expiration manager
-type Sweeper struct {
-	Interval time.Duration
-	Expire   time.Duration
-	Punctual bool
-	stop     chan struct{} // stopチャネルは構造体メンバにする必要がない。ので、Sweeper使い回しできるね
+// SweepMode :
+type SweepMode uint8
+
+// Sweep mode
+const (
+	SweepPunctual SweepMode = 1 << iota
+	SweepConcurrent
+)
+
+// Sweeper :
+type Sweeper interface {
+	Stop()
+	touch(c Cache) Cache
+	register(t *Throttle)
 }
 
-func (s *Sweeper) checkExpiration(t *Throttle) {
-	if s.Interval == 0 {
-		s.Interval = DefaultInterval
+// NewSweeper :
+func NewSweeper(interval, expire time.Duration, mode SweepMode) Sweeper {
+	if interval <= 0 {
+		interval = DefaultInterval
 	}
-	if s.Expire == 0 {
-		s.Expire = DefaultExpire
+	if expire <= 0 {
+		expire = DefaultExpire
 	}
 
-	s.stop = make(chan struct{})
-	timer := time.NewTicker(s.Interval)
+	punctual := mode&SweepPunctual == SweepPunctual
+	concurrent := mode&SweepConcurrent == SweepConcurrent
+
+	sw := &sweeper{
+		throttles:  make([]*Throttle, 0, 5),
+		interval:   interval,
+		expire:     int64(expire),
+		stopCh:     make(chan struct{}),
+		punctual:   punctual,
+		concurrent: concurrent,
+	}
+	sw.start()
+	return sw
+}
+
+type sweeper struct {
+	throttles []*Throttle
+	interval  time.Duration
+	expire    int64
+	stopCh    chan struct{}
+
+	punctual   bool
+	concurrent bool
+}
+
+func (s *sweeper) start() {
+	timer := time.NewTicker(s.interval)
 	for {
 		select {
 		case <-timer.C:
-			t.mutex.Lock()
-			now := time.Now()
-			for key, c := range t.m {
-				if ec := c.(*expireCache); ec.isExpired(now) {
-					t.terminate(key)
+			for _, th := range s.throttles {
+				if s.concurrent {
+					go s.sweep(th)
+				} else {
+					s.sweep(th)
 				}
 			}
-			t.mutex.Unlock()
-		case <-s.stop:
+
+		case <-s.stopCh:
 			timer.Stop()
+			s.stop()
 			return
 		}
 	}
 }
 
-func (s *Sweeper) touch(c Cache) *expireCache {
+func (s *sweeper) sweep(th *Throttle) {
+	th.mutex.Lock()
+	now := time.Now().UnixNano()
+	for key, c := range th.m {
+		if c.(*expireCache).isExpired(now) {
+			th.terminate(key)
+		}
+	}
+	th.mutex.Unlock()
+}
+
+func (s *sweeper) Stop() {
+	close(s.stopCh)
+}
+
+func (s *sweeper) stop() {
+	for _, th := range s.throttles {
+		th.terminateAll()
+	}
+}
+
+func (s *sweeper) register(t *Throttle) {
+	s.throttles = append(s.throttles, t)
+}
+
+func (s *sweeper) touch(c Cache) Cache {
 	return &expireCache{
-		Cache:   c,
-		sweeper: s,
-		// nextDeadline: time.Now().Add(s.Expire), // touchは必ずロック時に読み込まれなければならないこととする
+		Cache: c,
 	}
 }
 
 type expireCache struct {
 	Cache
-	sweeper      *Sweeper
-	nextDeadline time.Time
-	expired      bool
+	sweeper  *sweeper
+	deadline int64
 }
 
 func (e *expireCache) Get() interface{} {
-	if e.expired {
+	if e.deadline < 0 {
 		return nil
 	}
 	value := e.Cache.Get()
-	if !e.sweeper.Punctual {
-		e.nextDeadline = time.Now().Add(e.sweeper.Expire) // postpone expiration
+	if !e.sweeper.punctual {
+		e.deadline += e.sweeper.expire // postpone expiration
 	}
 	return value
 }
 
 func (e *expireCache) Reload() error {
-	if e.expired {
-		return errors.New("Reload: Cache already expired")
+	if e.deadline < 0 {
+		return errors.New("cache already expired")
 	}
 	return e.Cache.Reload()
 }
 
 func (e *expireCache) Updated() (bool, error) {
-	if e.expired {
-		return false, errors.New("Updated: Cache already expired")
+	if e.deadline < 0 {
+		return false, errors.New("cache already expired")
 	}
 	return e.Cache.Updated()
 }
 
+func (e *expireCache) Replace(v interface{}) error {
+	if e.deadline < 0 {
+		return errors.New("cache already expired")
+	}
+	err := e.Cache.Replace(v)
+	if err != nil {
+		return err
+	}
+	if !e.sweeper.punctual {
+		e.deadline += e.sweeper.expire // postpone expiration
+	}
+	return nil
+}
+
 func (e *expireCache) Release() {
-	if e.expired {
+	if e.deadline < 0 {
 		return
 	}
 	e.Cache.Release()
-	e.expired = true
+	e.deadline = -1
+	e.Cache = nil
 }
 
-func (e *expireCache) isExpired(now time.Time) bool {
-	return now.After(e.nextDeadline)
+func (e *expireCache) isExpired(now int64) (expired bool) {
+	if e.deadline <= 0 {
+		expired = true
+	} else {
+		expired = now > e.deadline
+	}
+	return
 }
 
 var _ Cache = (*expireCache)(nil)
+
+type nopSweeper struct{}
+
+func (*nopSweeper) Stop() {}
+
+func (*nopSweeper) register(*Throttle) {}
+
+func (*nopSweeper) touch(c Cache) Cache { return c }
+
+var nop Sweeper = &nopSweeper{}
