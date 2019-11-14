@@ -110,7 +110,8 @@ func (s *sweeper) register(t *Throttle) {
 
 func (s *sweeper) touch(c Cache) Cache {
 	return &expireCache{
-		Cache: c,
+		Cache:   c,
+		sweeper: s,
 	}
 }
 
