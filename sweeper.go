@@ -48,7 +48,7 @@ func NewSweeper(interval, expire time.Duration, mode SweepMode) Sweeper {
 		punctual:   punctual,
 		concurrent: concurrent,
 	}
-	sw.start()
+	go sw.start()
 	return sw
 }
 
