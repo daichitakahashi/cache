@@ -40,15 +40,13 @@ func (t *Throttle) Get(key string) (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		if t.sweeper != nil {
-			newCache = t.sweeper.touch(newCache)
-		}
-		t.m[key] = newCache
-		t.shift(key)
 		err = newCache.Reload()
 		if err != nil {
 			return nil, err
 		}
+		newCache = t.sweeper.touch(newCache)
+		t.m[key] = newCache
+		t.shift(key)
 		return newCache.Get(), nil
 	}
 
@@ -76,11 +74,11 @@ func (t *Throttle) Replace(key string, v interface{}) error {
 	if !ok {
 		return &OpError{"replace", fmt.Errorf("key %s not found", key)}
 	}
-	t.shift(key)
 	err := c.Replace(v)
 	if err != nil {
 		return err
 	}
+	t.shift(key)
 	return nil
 }
 

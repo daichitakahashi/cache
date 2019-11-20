@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -30,6 +31,19 @@ type Sweeper interface {
 
 // NewSweeper :
 func NewSweeper(interval, expire time.Duration, mode SweepMode) Sweeper {
+	sw := newSweeper(interval, expire, mode)
+	go sw.start()
+	return sw
+}
+
+// NewSweeperContext :
+func NewSweeperContext(ctx context.Context, interval, expire time.Duration, mode SweepMode) Sweeper {
+	sw := newSweeper(interval, expire, mode)
+	go sw.startCtx(ctx)
+	return sw
+}
+
+func newSweeper(interval, expire time.Duration, mode SweepMode) *sweeper {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
@@ -40,7 +54,7 @@ func NewSweeper(interval, expire time.Duration, mode SweepMode) Sweeper {
 	punctual := mode&SweepPunctual == SweepPunctual
 	concurrent := mode&SweepConcurrent == SweepConcurrent
 
-	sw := &sweeper{
+	return &sweeper{
 		throttles:  make([]*Throttle, 0, 5),
 		interval:   interval,
 		expire:     int64(expire),
@@ -48,8 +62,6 @@ func NewSweeper(interval, expire time.Duration, mode SweepMode) Sweeper {
 		punctual:   punctual,
 		concurrent: concurrent,
 	}
-	go sw.start()
-	return sw
 }
 
 type sweeper struct {
@@ -77,10 +89,35 @@ func (s *sweeper) start() {
 
 		case <-s.stopCh:
 			timer.Stop()
-			s.stop()
+			s.terminate()
 			return
 		}
 	}
+}
+
+func (s *sweeper) startCtx(ctx context.Context) {
+	timer := time.NewTicker(s.interval)
+	for {
+		select {
+		case <-timer.C:
+			for _, th := range s.throttles {
+				if s.concurrent {
+					go s.sweep(th)
+				} else {
+					s.sweep(th)
+				}
+			}
+		case <-ctx.Done():
+			timer.Stop()
+			s.terminate()
+			return
+		case <-s.stopCh:
+			timer.Stop()
+			s.terminate()
+			return
+		}
+	}
+
 }
 
 func (s *sweeper) sweep(th *Throttle) {
@@ -98,7 +135,7 @@ func (s *sweeper) Stop() {
 	close(s.stopCh)
 }
 
-func (s *sweeper) stop() {
+func (s *sweeper) terminate() {
 	for _, th := range s.throttles {
 		th.terminateAll()
 	}
